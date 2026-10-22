@@ -106,7 +106,7 @@ AutoDL 会在 GPU 空出来后显示一行绿色的“GPU充足”，问题是�
 
 ## 安装
 
-1. 在 [Releases](https://github.com/Kenny-Huang-mz/autodl-gpu-availability-monitor/releases) 下载最新 ZIP 并解压。
+1. 在 [Releases](../../releases) 下载最新 ZIP 并解压。
 2. 打开浏览器的扩展管理页：Chrome `chrome://extensions`、Edge `edge://extensions`、Arc `arc://extensions`。
 3. 打开“开发者模式”，选择“加载已解压的扩展程序”。
 4. 选中刚才解压出来的文件夹。
