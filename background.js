@@ -105,6 +105,111 @@ async function createNotification(summary) {
   } catch (error) { console.warn('Unable to create the GPU notification:', error); }
 }
 
+async function createAutoStartNotification(ok, target, message, tabId) {
+  const id = `autodl-autostart-${Date.now()}`;
+  try {
+    await chrome.notifications.create(id, {
+      type: 'basic', iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: ok ? 'AutoDL：已自动开机' : 'AutoDL：自动开机失败',
+      // 成功通知必须让用户能一键确认：5 分钟内不点就自动关机，避免无人空跑计费
+      message: ok
+        ? `${target || '监控实例'}：${message || '实例已开始开机'}。请在 5 分钟内点「我已回来，继续使用」确认，否则自动关机。`
+        : `${target || '监控实例'}：${message || '请手动开机'}`,
+      priority: 2, requireInteraction: true,
+      ...(ok ? { buttons: [{ title: '我已回来，继续使用' }] } : {})
+    });
+    if (ok && target) await saveAutoStartNotif(target, id, tabId);
+    return id;
+  } catch (error) {
+    console.warn('Unable to create the auto-start notification:', error);
+    return null;
+  }
+}
+
+async function createAutoStopNotification(ok, target, message) {
+  try {
+    await chrome.notifications.create(`autodl-autostop-${Date.now()}`, {
+      type: 'basic', iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: ok ? 'AutoDL：已自动关机' : 'AutoDL：自动关机失败',
+      message: `${target || '监控实例'}：${message || (ok ? '实例已自动关机' : '请手动关机')}`,
+      priority: 2, requireInteraction: !ok
+    });
+  } catch (error) { console.warn('Unable to create the auto-stop notification:', error); }
+}
+
+// 「已自动开机」通知需要能被点击确认，所以要把 notificationId → target/tabId 存起来。
+// 存在 storage.local 而不是内存：MV3 service worker 随时可能被回收重启。
+const AUTO_START_NOTIF_KEY = 'autoStartNotifs';
+
+async function saveAutoStartNotif(target, id, tabId) {
+  const stored = await chrome.storage.local.get(AUTO_START_NOTIF_KEY);
+  const map = { ...(stored?.[AUTO_START_NOTIF_KEY] || {}) };
+  map[target] = { id, tabId: tabId || null, at: Date.now() };
+  await chrome.storage.local.set({ [AUTO_START_NOTIF_KEY]: map });
+}
+
+async function takeAutoStartNotif(target) {
+  const stored = await chrome.storage.local.get(AUTO_START_NOTIF_KEY);
+  const map = { ...(stored?.[AUTO_START_NOTIF_KEY] || {}) };
+  const entry = map[target] || null;
+  if (entry) { delete map[target]; await chrome.storage.local.set({ [AUTO_START_NOTIF_KEY]: map }); }
+  return entry;
+}
+
+async function clearAutoStartNotification(target) {
+  if (!target) return;
+  const entry = await takeAutoStartNotif(target);
+  if (entry?.id) {
+    try { await chrome.notifications.clear(entry.id); } catch (_error) { /* 已关闭 */ }
+  }
+}
+
+async function sendToAutoDLTabs(message, preferredTabId) {
+  const ids = [];
+  if (preferredTabId) ids.push(preferredTabId);
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.id && /^https:\/\/(www\.|console\.)?autodl\.com\/console\/instance/.test(tab.url || '') && !ids.includes(tab.id)) ids.push(tab.id);
+    }
+  } catch (_error) { /* 保持只发 preferredTabId */ }
+  // 逐个发、第一个返回 ok 就停：确认只需要送达一次，不必广播给所有 AutoDL 标签页
+  for (const tabId of ids) {
+    try {
+      const result = await chrome.tabs.sendMessage(tabId, message);
+      if (result?.ok) return true;
+    } catch (_error) { /* 页面没开或内容脚本已停机，试下一个 */ }
+  }
+  return false;
+}
+
+async function confirmFromNotification(notificationId) {
+  const stored = await chrome.storage.local.get(AUTO_START_NOTIF_KEY);
+  const map = stored?.[AUTO_START_NOTIF_KEY] || {};
+  const target = Object.keys(map).find((key) => map[key]?.id === notificationId);
+  if (!target) return false;
+  const entry = await takeAutoStartNotif(target);
+  const delivered = await sendToAutoDLTabs({ type: 'CONFIRM_AUTO_START', target }, entry?.tabId);
+  try { await chrome.notifications.clear(notificationId); } catch (_error) { /* 已关闭 */ }
+  if (!delivered) {
+    try {
+      await chrome.notifications.create(`autodl-confirm-missed-${Date.now()}`, {
+        type: 'basic', iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: 'AutoDL：确认未送达', message: '没找到 AutoDL 实例页面。请打开该页面，在右下角面板点「我已回来」，否则 5 分钟后会自动关机。',
+        priority: 2
+      });
+    } catch (_error) { /* 忽略 */ }
+  }
+  return delivered;
+}
+
+// 后台标签页可能被浏览器的「内存节省」丢弃，丢弃后内容脚本就停了，监控会静默失效。
+// 对 AutoDL 实例页关掉自动丢弃，页面本身仍可在后台运行，不会抢占焦点。
+async function keepTabAlive(tabId) {
+  if (!tabId) return;
+  try { await chrome.tabs.update(tabId, { autoDiscardable: false }); } catch (_error) { /* 标签页已关闭 */ }
+}
+
 function isInjectableUrl(url) {
   return /^https?:\/\//i.test(url || '');
 }
@@ -165,10 +270,54 @@ async function focusAutoDL() {
   }
 }
 
+// 后台标签页的 setInterval 会被浏览器降频到约每分钟一次。
+// 用 alarms 定期给 AutoDL 页面发一次 SCAN，把检测节奏拉回来（不影响前台页面，也不抢焦点）。
+const SCAN_ALARM = 'autodl-scan';
+
+async function ensureScanAlarm() {
+  try {
+    const existing = await chrome.alarms.get(SCAN_ALARM);
+    if (!existing) await chrome.alarms.create(SCAN_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.5 });
+  } catch (error) { console.debug('Unable to schedule the scan alarm:', error); }
+}
+
+async function scanAutoDLTabs() {
+  const stored = await chrome.storage.sync.get({ config: { enabled: true } });
+  if (stored.config?.enabled === false) return;
+  const tabs = await chrome.tabs.query({});
+  const targets = tabs.filter((tab) => tab.id && /^https:\/\/(www\.|console\.)?autodl\.com\/console\/instance/.test(tab.url || ''));
+  await Promise.allSettled(targets.map((tab) => chrome.tabs.sendMessage(tab.id, { type: 'SCAN' })));
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === SCAN_ALARM) scanAutoDLTabs().catch((error) => console.debug('Scan alarm failed:', error));
+});
+
+chrome.runtime.onInstalled.addListener(() => { ensureScanAlarm(); });
+chrome.runtime.onStartup.addListener(() => { ensureScanAlarm(); });
+ensureScanAlarm();
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
+    if (sender.tab?.id) keepTabAlive(sender.tab.id);
     if (message?.type === 'FETCH_AUTODL_INSTANCES') {
       sendResponse(await fetchAutoDLInstances(sender.tab?.id));
+      return;
+    }
+    if (message?.type === 'AUTO_START_RESULT') {
+      await createAutoStartNotification(Boolean(message.ok), message.target, message.message, sender.tab?.id);
+      return;
+    }
+    if (message?.type === 'AUTO_START_CONFIRMED') {
+      // 用户在页面面板点了「我已回来」，清掉那条待确认的系统通知
+      await clearAutoStartNotification(message.target);
+      return;
+    }
+    if (message?.type === 'AUTO_STOP_RESULT') {
+      // 已经自动关机了，那条「请在 5 分钟内确认」的通知就失效了，一并清掉，
+      // 否则用户之后点它只会得到一次无意义的确认失败。
+      await clearAutoStartNotification(message.target);
+      await createAutoStopNotification(Boolean(message.ok), message.target, message.message);
       return;
     }
     if (message?.type === 'GPU_AVAILABLE') {
@@ -227,4 +376,18 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (activeAlert && tab.active) await showAlertInTab(tab, activeAlert);
 });
 
-chrome.notifications.onClicked.addListener(focusAutoDL);
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  try {
+    // 「已自动开机」通知：点通知本身也算确认（用户选定的交互方式）
+    if (await confirmFromNotification(notificationId)) { await focusAutoDL(); return; }
+  } catch (error) { console.debug('Unable to confirm from the notification:', error); }
+  await focusAutoDL();
+});
+
+chrome.notifications.onButtonClicked.addListener(async (notificationId, buttonIndex) => {
+  if (buttonIndex !== 0) return;
+  try {
+    await confirmFromNotification(notificationId);
+    await focusAutoDL();
+  } catch (error) { console.debug('Unable to confirm from the notification button:', error); }
+});

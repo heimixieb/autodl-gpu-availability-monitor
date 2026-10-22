@@ -2,6 +2,8 @@
   <h1>AutoDL GPU Monitor</h1>
   <label class="switch"><input id="enabled" type="checkbox"> 启用监控</label>
   <label>实例名称或 ID<textarea id="targets" rows="3" placeholder="多个目标用逗号分隔"></textarea></label>
+  <label class="switch"><input id="autostart" type="checkbox"> GPU 空出后自动开机（会产生费用）</label>
+  <p class="hint">开启后，当实例显示「GPU充足」且处于「已关机」时，扩展会代你点击该实例的「开机」按钮，并在开机成功后给你 5 分钟确认。不需要页面在前台，也不会抢走你的窗口焦点。开机即开始计费，失败会重试 3 次后通知你手动开机；<strong>5 分钟内没点「我已回来，继续使用」就自动关机并关闭本开关</strong>，避免无人空跑计费。</p>
   <div class="grid"><label>刷新间隔（秒）<input id="refresh" type="number" min="30"></label><label>响铃方式<select id="mode"><option value="continuous">持续响铃</option><option value="once">仅响一次</option></select></label></div>
   <label>重复响铃间隔（秒）<input id="alarm" type="number" min="5"></label>
   <div class="sound-row"><label>铃声<select id="sound"><option value="classic">经典提示</option><option value="double">双响</option><option value="digital">数字警报</option><option value="gentle">柔和提示</option><option value="urgent">急促提醒</option></select></label><button id="preview" type="button">试听</button></div>
