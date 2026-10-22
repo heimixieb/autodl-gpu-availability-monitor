@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoDL GPU Availability Monitor",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Monitor rented AutoDL instances and notify when GPU becomes available.",
   "permissions": ["storage", "notifications", "offscreen", "scripting", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],

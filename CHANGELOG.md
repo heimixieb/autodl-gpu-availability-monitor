@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.5.0] - 2026-10-22
+
+### Added
+
+- **System-level alert window.** Alerts are no longer limited to a toast plus the in-page panel. A dedicated extension window (`alert.html`) is opened as a real OS window with `type: 'popup'` + `focused: true`, so it is raised to the foreground even when the browser is minimised or behind other applications. It has to be dismissed with a button — it does not slide away on its own the way a toast does.
+- While the window is open, a 30-second alarm keeps calling `chrome.windows.update({ drawAttention: true })`, so the taskbar button keeps flashing until the alert is dismissed. This does not steal focus, so it cannot interrupt typing.
+- The window is reused rather than stacked: a repeat of the same alert updates the open window (and only flashes the taskbar) instead of opening another one.
+- Three alert shapes: **GPU available** (green, mute / dismiss / open AutoDL), **auto-started and now billing** (red, live 5-minute countdown with a progress bar, `我已回来，继续使用` as the primary button), and **auto-shutdown result** (blue on success, red with a "shut down manually" button on failure).
+- New popup setting `系统级弹窗` with three modes: `浏览器在后台时弹出` (default), `每次提醒都弹出`, `只发系统通知，不弹窗`.
+- `Enter` confirms the primary button and `Esc` dismisses the window.
+- New message routes: `GET_SYSTEM_ALERT`, `ALERT_WINDOW_ACTION`, `TEST_SYSTEM_ALERT`, `GET_BACKGROUND_INFO`.
+- `AUTO_START_RESULT` now carries `deadline` and `windowMs` so the alert window can render the same countdown as the in-page panel.
+- The popup detects a stale service worker: unpacked extensions keep running the previously loaded `background.js` until the extension is reloaded, while `popup.html` / `popup.js` are re-read from disk on every open. That mismatch made the test button appear to do nothing. The popup now performs a version handshake on open, shows a warning when the background is outdated, and offers a one-click **立即重新加载扩展** button (`chrome.runtime.reload()`).
+
+### Fixed
+
+- The popup's test button sent `TEST_GLOBAL_ALERT`, which only plays the sound and shows the in-page card — so pressing **测试系统级提醒** never produced the system-level window. It now sends `TEST_SYSTEM_ALERT`.
+- The alert window was skipped whenever any browser window was focused, even when the active tab was not an AutoDL page. The in-page panel only exists on the AutoDL instance page, so a user reading another tab was left with sound only. The check is now `alertVisibleToUser()`: a focused normal window **and** an active AutoDL instance tab are both required, otherwise the window is shown.
+- The auto-start alert icon used `⏻` (U+23FB), which has no glyph in Chinese system fonts and rendered as a tofu box. It is now `¥`.
+- The alert window sized itself from `card.scrollHeight`, which returns the viewport height while the card is `height: 100%`, and it did not subtract the window frame — the bottom buttons were clipped. It now measures the real content height and accounts for the frame.
+
+### Changed
+
+- The popup's test button is now `测试系统级提醒`; it forces the window open even when the browser is focused, so the feature can be verified on the spot.
+- Closing the GPU alert from the alert window also clears the in-page alert, and vice versa.
+
+### Notes
+
+- The alert window is produced by the extension itself and needs no installer, native messaging host or registry change. The Windows toast path is unchanged and still used in parallel, so a machine with system notifications switched off still gets a visible alert.
+- `chrome.windows` needs no extra manifest permission; the permission list is unchanged.
+- `alwaysOnTop` is a ChromeOS-only property; Chrome and Edge on Windows/macOS silently ignore it (verified on a real Edge 155 install — the created window reports `alwaysOnTop: false`). The window is therefore raised once on creation and kept discoverable through taskbar flashing rather than pinned permanently above other windows.
+
 ## [1.4.0] - 2026-10-22
 
 ### Added

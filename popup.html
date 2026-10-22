@@ -7,7 +7,13 @@
   <div class="grid"><label>刷新间隔（秒）<input id="refresh" type="number" min="30"></label><label>响铃方式<select id="mode"><option value="continuous">持续响铃</option><option value="once">仅响一次</option></select></label></div>
   <label>重复响铃间隔（秒）<input id="alarm" type="number" min="5"></label>
   <div class="sound-row"><label>铃声<select id="sound"><option value="classic">经典提示</option><option value="double">双响</option><option value="digital">数字警报</option><option value="gentle">柔和提示</option><option value="urgent">急促提醒</option></select></label><button id="preview" type="button">试听</button></div>
+  <label>系统级弹窗<select id="alertWindow"><option value="auto">浏览器在后台时弹出（推荐）</option><option value="always">每次提醒都弹出</option><option value="never">只发系统通知，不弹窗</option></select></label>
+  <p class="hint">提醒会同时走三条路：页面右下角面板、Windows 系统通知、以及一个<strong>独立的系统级弹窗</strong>。弹窗是扩展自己开的窗口，浏览器在后台也会弹到最前面，并且每 30 秒闪一次任务栏，直到你点掉为止——系统通知被关掉或开了专注助手时，靠它才不会漏掉。</p>
+  <div class="warn" id="staleWarning" hidden>
+    <span id="staleText"></span>
+    <button type="button" id="reloadExt">立即重新加载扩展</button>
+  </div>
   <div id="diagnostic">尚无诊断结果</div>
-  <div class="actions"><button id="test">测试全局提醒</button><button id="save" class="primary">保存</button></div>
+  <div class="actions"><button id="test">测试系统级提醒</button><button id="save" class="primary">保存</button></div>
   <script src="popup.js"></script>
 </body></html>

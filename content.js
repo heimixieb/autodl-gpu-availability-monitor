@@ -618,7 +618,14 @@
         addLog(`自动开机成功：${target} 状态 ${statusText(status)}`);
         // 开机成功即开始计费：开一个 5 分钟人工确认窗口，超时自动关机
         beginConfirmWindow(target);
-        safeSend({ type: 'AUTO_START_RESULT', ok: true, target, message: `已开机（状态 ${statusText(status)}）` });
+        const pending = confirmState.get(target) || {};
+        safeSend({
+          type: 'AUTO_START_RESULT', ok: true, target,
+          message: `已开机（状态 ${statusText(status)}）`,
+          // 把截止时间带给 background，置顶提醒窗口要按它显示倒计时
+          deadline: pending.deadline || (Date.now() + AUTO_CONFIRM_WINDOW),
+          windowMs: AUTO_CONFIRM_WINDOW
+        });
         renderPanel();
         return;
       }

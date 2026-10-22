@@ -10,6 +10,7 @@ This is an independent community project, not an official AutoDL product. By def
 
 - Monitor multiple rented instances by name or instance ID
 - In-page banner, audible alarm, and system notification
+- **System-level alert window**: raised to the foreground even while the browser is minimised or covered, and dismissed only with a button
 - One-shot or repeating alarm with a configurable interval
 - In-page status panel with recent checks and logs
 - Per-row matching to prevent status leakage from adjacent instances
@@ -18,6 +19,34 @@ This is an independent community project, not an official AutoDL product. By def
 - Optional timeout shutdown: if nobody confirms within 5 minutes of an automatic start, the instance is shut down so it cannot keep billing while you are away
 - No AutoDL password, cookie, or access-token storage
 - Supports Chrome, Edge, Arc, and other Chromium browsers
+
+## Three alert channels
+
+A system notification alone is not reliable: if the OS notification toggle is off (many "optimiser" scripts turn it off) or Focus Assist is on, calling the toast API still succeeds but the system **silently drops** the toast — you are left with sound only, and if sound is muted you learn nothing.
+
+So every important alert goes through three channels at once:
+
+| Channel | Behaviour |
+| --- | --- |
+| In-page panel | Visible only on the AutoDL page; good while you are looking at the browser |
+| System notification | Leaves a trace in the notification centre, but can be blocked by OS settings |
+| **System-level alert window** | An extension-owned OS window raised to the front on creation, visible while the browser is in the background, dismissed only by a button |
+
+The alert window needs no installer, no native messaging host and no registry change — the extension creates it with `chrome.windows.create`. It has three shapes:
+
+- **GPU available** (green): `静音` / `知道了` / `打开 AutoDL`
+- **Auto-started and now billing** (red): live 5-minute countdown with a progress bar, primary button `我已回来，继续使用`
+- **Auto-shutdown result** (blue on success, red on failure): on failure the primary button becomes `打开 AutoDL 手动关机`
+
+`Enter` activates the primary button, `Esc` closes the window.
+
+**One honest limitation**: a browser extension cannot make a window permanently stay on top. `alwaysOnTop` is a ChromeOS-only property; Chrome and Edge on Windows/macOS silently ignore it (verified on a real install). The actual behaviour is therefore: the window grabs focus and comes to the front when created, then the taskbar button flashes every 30 seconds until you dismiss it — it will not interrupt your typing, but you will not miss it. Pinning a window physically above every other program would require a native helper binary, which this extension deliberately does not ship.
+
+By default it opens whenever **you cannot see the in-page panel**. The check is: a browser window is focused **and** its active tab is an AutoDL instance page — only then is the panel considered visible. So minimising the browser, switching to another application, or merely switching to another tab all trigger the window.
+
+The popup's `系统级弹窗` setting switches this to "every alert" or "notification only". The `测试系统级提醒` button forces the window open so you can verify it on the spot.
+
+**If `测试系统级提醒` appears to do nothing**, the browser is still running an older background script. Editing an unpacked extension's files does not reload its service worker — `popup.html` / `popup.js` are re-read from disk on every open, but `background.js` keeps running the previously loaded code until the extension is reloaded. The popup therefore performs a version handshake on open and, on mismatch, shows a red box with a one-click **立即重新加载扩展** button.
 
 ## Auto-start (optional)
 
@@ -41,7 +70,8 @@ Once the automatic start succeeds (the API reports `starting` or `running`), you
 
 - The status panel at the bottom-right of the AutoDL page shows a red **我已回来：<instance>（取消自动关机）** button with a live countdown;
 - The `AutoDL：已自动开机` system notification also carries a **我已回来，继续使用** button;
-- Confirming in either place cancels the automatic shutdown.
+- The always-on-top window shows the same countdown with `我已回来，继续使用` as its primary button;
+- Confirming in any of the three places cancels the automatic shutdown.
 
 **If nobody confirms within 5 minutes**, the extension clicks that instance row's **关机** button, confirms the shutdown dialog, then re-checks the instance API (up to 3 attempts, 15 seconds apart). On success it sends `AutoDL：已自动关机` and **turns the auto-start switch off** — otherwise `GPU available → start → nobody back → shut down → GPU available again` would loop and keep charging you. Re-enable the switch when you need it.
 
@@ -50,7 +80,7 @@ The deadline is stored in `storage.local`, so a page reload does not restart the
 Worth knowing:
 
 - **You pay for it**: once the instance boots, AutoDL bills you under its own rules. The timeout shutdown is a safety net for "nobody came back", not a replacement for watching your bill. Check your billing mode and balance first.
-- The tab does not need to be in the foreground. The extension does not move the mouse or steal window focus, so you can keep working.
+- The tab does not need to be in the foreground. The extension does not move the mouse; the always-on-top alert window does grab focus once, deliberately — otherwise you might not notice it.
 - The AutoDL tab **must stay open** — it must not be closed or discarded. The extension marks that tab as not auto-discardable and adds an `alarms`-based check every 30 seconds so a background tab's throttled timers cannot stall detection.
 - If you only want the alert and no charges, leave the switch off; behaviour is exactly as before.
 - Page auto-refresh is paused while the confirmation window is open, so the button cannot disappear under your cursor.

@@ -203,6 +203,321 @@ async function confirmFromNotification(notificationId) {
   return delivered;
 }
 
+// ---------- 系统级置顶提醒窗口 ----------
+// chrome.notifications 的 toast 依赖 Windows/macOS 的系统通知开关。一旦系统通知被关掉
+// （或者开着专注助手），提醒就只剩声音；浏览器在后台时用户根本看不到任何东西。
+// 所以关键提醒再额外弹一个独立的提醒窗口：它不属于任何标签页，浏览器最小化/被别的程序
+// 盖住时也会弹到桌面最前面，而且必须点一下按钮才消失，不会像 toast 那样自己滑走。
+// 注意「最前面」的实现方式：创建时 focused:true 抢一次焦点 + 每 30 秒 drawAttention 闪任务栏。
+// 不是 alwaysOnTop —— 那个属性在 Windows/macOS 上会被浏览器静默忽略（已真机验证）。
+const ALERT_WINDOW_PATH = 'alert.html';
+const ALERT_WINDOW_ID_KEY = 'systemAlertWindowId';
+const ALERT_PAYLOAD_KEY = 'systemAlertPayload';
+const ALERT_WINDOW_WIDTH = 430;
+const ALERT_WINDOW_HEIGHT = 300;
+
+let alertWindowId = null;
+let alertPayload = null;
+
+async function alertWindowMode() {
+  try {
+    const stored = await chrome.storage.sync.get({ config: {} });
+    const mode = stored.config?.alertWindow;
+    return mode === 'always' || mode === 'never' ? mode : 'auto';
+  } catch (_error) { return 'auto'; }
+}
+
+async function loadAlertWindowState() {
+  try {
+    const stored = await chrome.storage.local.get([ALERT_WINDOW_ID_KEY, ALERT_PAYLOAD_KEY]);
+    if (alertWindowId == null) alertWindowId = stored?.[ALERT_WINDOW_ID_KEY] ?? null;
+    if (!alertPayload) alertPayload = stored?.[ALERT_PAYLOAD_KEY] ?? null;
+  } catch (_error) { /* 读不到就当作没有 */ }
+}
+
+async function rememberAlertWindow(id) {
+  alertWindowId = id;
+  try { await chrome.storage.local.set({ [ALERT_WINDOW_ID_KEY]: id }); } catch (_error) { /* 忽略 */ }
+}
+
+async function alertWindowAlive() {
+  if (alertWindowId == null) return false;
+  try {
+    await chrome.windows.get(alertWindowId);
+    return true;
+  } catch (_error) {
+    alertWindowId = null;
+    try { await chrome.storage.local.remove(ALERT_WINDOW_ID_KEY); } catch (_ignore) { /* 忽略 */ }
+    return false;
+  }
+}
+
+// 只看普通窗口：置顶提醒窗口本身是 popup 类型，不能算「浏览器在前台」，
+// 否则窗口一弹出来就会把自己当成「用户正在看浏览器」，后续提醒就不再弹了。
+async function browserWindowFocused() {
+  try {
+    const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    return windows.some((item) => item.focused);
+  } catch (_error) { return true; }
+}
+
+const AUTODL_INSTANCE_URL_RE = /^https:\/\/(www\.|console\.)?autodl\.com\/console\/instance/;
+
+// 「用户此刻能不能看见页面内面板」。
+// 注意不能只用 browserWindowFocused()：面板只画在 AutoDL 实例页上。
+// 用户明明开着浏览器、但停在别的标签页（比如正在看文档）时，面板根本不可见，
+// 这时候如果因为「浏览器在前台」就不弹系统级窗口，就退回成只能听声音了 ——
+// 正是用户反馈要解决的问题。所以必须同时满足：
+//   1. 有普通窗口在前台；
+//   2. 该前台窗口的当前标签页就是 AutoDL 实例页。
+async function alertVisibleToUser() {
+  try {
+    const windows = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+    const focused = windows.find((item) => item.focused);
+    if (!focused) return false;
+    const activeTab = (focused.tabs || []).find((tab) => tab.active);
+    return Boolean(activeTab && AUTODL_INSTANCE_URL_RE.test(activeTab.url || ''));
+  } catch (_error) {
+    // 拿不到标签页信息时保守处理：当作看不见，宁可多弹一次也不漏
+    return false;
+  }
+}
+
+async function saveAlertPayload(payload) {
+  alertPayload = payload;
+  try { await chrome.storage.local.set({ [ALERT_PAYLOAD_KEY]: payload }); } catch (_error) { /* 忽略 */ }
+}
+
+async function pushAlertPayload(payload) {
+  if (!await alertWindowAlive()) return false;
+  // 注意：chrome.tabs.sendMessage 的第一个参数是 tabId，不是 windowId。
+  // 置顶窗口是 popup 类型，里面有一个扩展页面 tab，得先把它查出来再发，
+  // 否则会把消息发给 id 恰好相同的无关标签页。
+  try {
+    const tabs = await chrome.tabs.query({ windowId: alertWindowId });
+    const tabId = tabs.find((tab) => tab.id != null)?.id;
+    if (tabId != null) {
+      await chrome.tabs.sendMessage(tabId, { type: 'SHOW_SYSTEM_ALERT', payload });
+      return true;
+    }
+  } catch (_error) { /* 退回广播 */ }
+  try {
+    await chrome.runtime.sendMessage({ type: 'SHOW_SYSTEM_ALERT', payload });
+    return true;
+  } catch (_error) { return false; }
+}
+
+async function alertWindowBounds() {
+  const width = ALERT_WINDOW_WIDTH;
+  try {
+    const last = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+    if (last && Number.isFinite(last.left) && Number.isFinite(last.top)) {
+      return {
+        width,
+        left: Math.max(0, last.left + last.width - width - 28),
+        top: Math.max(0, last.top + last.height - ALERT_WINDOW_HEIGHT - 72)
+      };
+    }
+  } catch (_error) { /* 拿不到就交给浏览器自己摆 */ }
+  return { width };
+}
+
+async function createAlertWindow(payload) {
+  try {
+    const bounds = await alertWindowBounds();
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL(ALERT_WINDOW_PATH),
+      type: 'popup',
+      focused: true,
+      width: bounds.width,
+      height: ALERT_WINDOW_HEIGHT,
+      ...(bounds.left == null ? {} : { left: bounds.left, top: bounds.top })
+    });
+    await rememberAlertWindow(win.id);
+    // alwaysOnTop 只在 ChromeOS 上生效，Windows/macOS 的 Chrome/Edge 会静默忽略（不报错）。
+    // 真机实测确认过：这里传了也拿不到置顶。所以窗口真正的「弹到最前」靠的是
+    // create 时的 focused:true + 后续 raiseAlertWindow 的 focused:true，
+    // 而不是这个属性。保留它只为 ChromeOS 上的用户。
+    try {
+      await chrome.windows.update(win.id, { alwaysOnTop: true, focused: true, drawAttention: true });
+    } catch (_error) { /* 平台不支持置顶，忽略 */ }
+    return true;
+  } catch (error) {
+    console.warn('Unable to open the system alert window:', error);
+    return false;
+  } finally {
+    syncAttentionAlarm();
+  }
+}
+
+async function raiseAlertWindow() {
+  if (!await alertWindowAlive()) return false;
+  try {
+    // alwaysOnTop 一起传只是为了 ChromeOS；Windows/macOS 上它被忽略，
+    // 真正起作用的是 focused:true 和 drawAttention:true。
+    await chrome.windows.update(alertWindowId, { focused: true, alwaysOnTop: true, drawAttention: true });
+    return true;
+  } catch (_error) { return false; }
+}
+
+async function flashAlertWindow() {
+  if (!await alertWindowAlive()) return false;
+  try {
+    await chrome.windows.update(alertWindowId, { drawAttention: true });
+    return true;
+  } catch (_error) { return false; }
+}
+
+// 窗口还开着就每隔一段时间闪一次任务栏，直到用户点掉它。
+// drawAttention 只闪任务栏、不抢焦点，所以不会打断用户正在做的事；
+// 这是「浏览器在后台也一定能注意到」的兜底手段，不依赖任何系统权限。
+const ALERT_ATTENTION_ALARM = 'autodl-alert-attention';
+
+async function syncAttentionAlarm() {
+  const alive = await alertWindowAlive();
+  try {
+    if (alive) {
+      const existing = await chrome.alarms.get(ALERT_ATTENTION_ALARM);
+      if (!existing) await chrome.alarms.create(ALERT_ATTENTION_ALARM, { periodInMinutes: 0.5 });
+    } else {
+      await chrome.alarms.clear(ALERT_ATTENTION_ALARM);
+    }
+  } catch (_error) { /* 闹钟不可用时忽略，窗口本身仍然可见 */ }
+}
+
+/**
+ * 展示一条系统级提醒。
+ * - alertWindow 配置为 never：完全不弹窗口（只保留 toast 和页面内提示）。
+ * - 用户此刻能看见 AutoDL 页面面板：不弹（面板已经能看见），除非 force。
+ * - 其余情况（浏览器在后台 / 停在别的标签页 / 窗口已打开）：弹出来并抢一次焦点，确保用户真的看见。
+ */
+async function presentSystemAlert(payload, options = {}) {
+  const mode = await alertWindowMode();
+  if (mode === 'never') return false;
+  const previous = alertPayload;
+  await saveAlertPayload(payload);
+
+  const alive = await alertWindowAlive();
+  if (alive) {
+    await pushAlertPayload(payload);
+    // 同一条提醒重复刷新时只闪任务栏，不反复抢焦点，避免打断用户打字
+    const isRepeat = previous && previous.key === payload.key;
+    if (isRepeat && !options.force) await flashAlertWindow();
+    else await raiseAlertWindow();
+    return true;
+  }
+
+  const visible = await alertVisibleToUser();
+  if (visible && mode !== 'always' && !options.force) return false;
+  return createAlertWindow(payload);
+}
+
+async function closeSystemAlert(kind) {
+  if (kind && alertPayload && alertPayload.kind !== kind) return false;
+  await saveAlertPayload(null);
+  if (await alertWindowAlive()) {
+    try { await chrome.windows.remove(alertWindowId); } catch (_error) { /* 已关闭 */ }
+  }
+  alertWindowId = null;
+  try { await chrome.storage.local.remove(ALERT_WINDOW_ID_KEY); } catch (_error) { /* 忽略 */ }
+  await syncAttentionAlarm();
+  return true;
+}
+
+function gpuAlertPayload(summary, names, muted) {
+  return {
+    kind: 'gpu', key: 'gpu', accent: 'green', badge: '✓',
+    title: 'GPU 已经空出来了',
+    subtitle: names?.length ? names.join('、') : '',
+    message: summary || '监控实例已有可用 GPU，回 AutoDL 页面就能开机。',
+    buttons: [
+      { action: 'mute', label: muted ? '恢复声音' : '静音' },
+      { action: 'close', label: '知道了' },
+      { action: 'open', label: '打开 AutoDL', primary: true }
+    ]
+  };
+}
+
+function autoStartAlertPayload(target, message, deadline, windowMs) {
+  const minutes = Math.max(1, Math.round((Number(windowMs) || 5 * 60 * 1000) / 60000));
+  return {
+    // badge 用 ¥ 而不是电源符号 ⏻(U+23FB)：后者在中文字体里没有字形，
+    // 真机上会渲染成一个方块。¥ 既能表达「正在计费」，所有字体也都有。
+    kind: 'autostart', key: `autostart:${target}`, target, accent: 'red', badge: '¥',
+    title: '实例已自动开机，开始计费',
+    subtitle: target || '',
+    message: `${message || '实例已开始开机'}。如果不点「我已回来，继续使用」，${minutes} 分钟后会自动关机。`,
+    deadline: Number(deadline) || null,
+    windowMs: Number(windowMs) || 5 * 60 * 1000,
+    countdownHint: '未确认将自动关机',
+    buttons: [
+      { action: 'open', label: '打开 AutoDL' },
+      { action: 'confirm', label: '我已回来，继续使用', primary: true }
+    ]
+  };
+}
+
+function autoStopAlertPayload(ok, target, message) {
+  return {
+    kind: 'autostop', key: `autostop:${target}`, target,
+    accent: ok ? 'blue' : 'red', badge: ok ? '✓' : '!',
+    title: ok ? '已自动关机，停止计费' : '自动关机失败',
+    subtitle: target || '',
+    message: message || (ok ? '实例已自动关机。' : '请手动到 AutoDL 关机，否则会继续计费。'),
+    buttons: ok
+      ? [{ action: 'close', label: '知道了', primary: true }]
+      : [{ action: 'close', label: '知道了' }, { action: 'open', label: '打开 AutoDL 手动关机', primary: true }]
+  };
+}
+
+async function toggleAlarmMuted() {
+  const stored = await chrome.storage.sync.get({ config: {} });
+  const config = { ...stored.config, alarmMuted: !Boolean(stored.config?.alarmMuted) };
+  await chrome.storage.sync.set({ config });
+  return Boolean(config.alarmMuted);
+}
+
+async function handleAlertWindowAction(action, kind) {
+  if (action === 'open') {
+    await focusAutoDL();
+    await closeSystemAlert();
+    return;
+  }
+  if (action === 'close') {
+    await closeSystemAlert();
+    return;
+  }
+  if (action === 'mute') {
+    const muted = await toggleAlarmMuted();
+    if (activeAlert) await updateAlert({ muted });
+    if (alertPayload?.kind === 'gpu') {
+      await presentSystemAlert(gpuAlertPayload(alertPayload.message, activeAlert?.names, muted));
+    }
+    return;
+  }
+  if (action === 'confirm') {
+    const target = alertPayload?.target;
+    if (!target) { await closeSystemAlert(); return; }
+    const delivered = await sendToAutoDLTabs({ type: 'CONFIRM_AUTO_START', target });
+    if (delivered) {
+      await clearAutoStartNotification(target);
+      await closeSystemAlert('autostart');
+      return;
+    }
+    // 没送达就把窗口内容换成明确指引，别让用户以为已经确认过了
+    await presentSystemAlert({
+      ...alertPayload,
+      accent: 'amber', badge: '!',
+      title: '确认未送达',
+      message: '没找到 AutoDL 实例页面，无法确认。请打开该页面后在右下角面板点「我已回来」，否则到时间仍会自动关机。',
+      buttons: [
+        { action: 'close', label: '知道了' },
+        { action: 'open', label: '打开 AutoDL', primary: true }
+      ]
+    }, { force: true });
+  }
+}
+
 // 后台标签页可能被浏览器的「内存节省」丢弃，丢弃后内容脚本就停了，监控会静默失效。
 // 对 AutoDL 实例页关掉自动丢弃，页面本身仍可在后台运行，不会抢占焦点。
 async function keepTabAlive(tabId) {
@@ -291,11 +606,27 @@ async function scanAutoDLTabs() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SCAN_ALARM) scanAutoDLTabs().catch((error) => console.debug('Scan alarm failed:', error));
+  if (alarm.name === ALERT_ATTENTION_ALARM) {
+    // 窗口还开着就继续闪任务栏，提醒用户这件事没处理完
+    alertWindowAlive()
+      .then((alive) => (alive ? flashAlertWindow() : syncAttentionAlarm()))
+      .catch((error) => console.debug('Alert attention failed:', error));
+  }
 });
 
 chrome.runtime.onInstalled.addListener(() => { ensureScanAlarm(); });
 chrome.runtime.onStartup.addListener(() => { ensureScanAlarm(); });
 ensureScanAlarm();
+loadAlertWindowState().catch((error) => console.debug('Unable to restore the alert window state:', error));
+
+// 用户自己关掉置顶窗口时同步清掉记录，下次提醒才会重新弹
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId !== alertWindowId) return;
+  alertWindowId = null;
+  alertPayload = null;
+  chrome.storage.local.remove([ALERT_WINDOW_ID_KEY, ALERT_PAYLOAD_KEY]).catch(() => { /* 忽略 */ });
+  syncAttentionAlarm().catch(() => { /* 忽略 */ });
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -306,11 +637,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message?.type === 'AUTO_START_RESULT') {
       await createAutoStartNotification(Boolean(message.ok), message.target, message.message, sender.tab?.id);
+      // 开机成功意味着已经开始计费：除了 toast，再弹一个置顶窗口，浏览器在后台也不会漏看
+      if (message.ok) {
+        await presentSystemAlert(autoStartAlertPayload(
+          message.target, message.message, message.deadline, message.windowMs
+        ));
+      }
       return;
     }
     if (message?.type === 'AUTO_START_CONFIRMED') {
-      // 用户在页面面板点了「我已回来」，清掉那条待确认的系统通知
+      // 用户在页面面板点了「我已回来」，清掉那条待确认的系统通知和置顶窗口
       await clearAutoStartNotification(message.target);
+      await closeSystemAlert('autostart');
       return;
     }
     if (message?.type === 'AUTO_STOP_RESULT') {
@@ -318,12 +656,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // 否则用户之后点它只会得到一次无意义的确认失败。
       await clearAutoStartNotification(message.target);
       await createAutoStopNotification(Boolean(message.ok), message.target, message.message);
+      await presentSystemAlert(autoStopAlertPayload(Boolean(message.ok), message.target, message.message));
       return;
     }
     if (message?.type === 'GPU_AVAILABLE') {
       const stored = await chrome.storage.sync.get({ config: { alarmMuted: false } });
       const alert = { signature: message.signature, names: message.names || [], summary: message.summary || '', sourceTabId: sender.tab?.id || null, muted: Boolean(stored.config?.alarmMuted) };
       await Promise.all([createNotification(alert.summary), broadcastAlert(alert)]);
+      await presentSystemAlert(gpuAlertPayload(alert.summary, alert.names, alert.muted));
     }
     if (message?.type === 'PLAY_ALARM') await playAlarm(message.sound);
     if (message?.type === 'GET_ACTIVE_ALERT') {
@@ -336,6 +676,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const config = { ...stored.config, alarmMuted: !Boolean(stored.config?.alarmMuted) };
       await chrome.storage.sync.set({ config });
       await updateAlert({ muted: config.alarmMuted });
+      // 置顶窗口上的按钮文案要跟着变，否则「静音」按了没反应
+      if (alertPayload?.kind === 'gpu') {
+        await presentSystemAlert(gpuAlertPayload(alertPayload.message, activeAlert.names, config.alarmMuted));
+      }
     }
     if (message?.type === 'CLOSE_GLOBAL_ALERT') {
       const stored = await chrome.storage.sync.get({ config: { refreshSeconds: 60 } });
@@ -348,14 +692,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (_error) { /* tab closed */ }
       }
       await clearAlert();
+      await closeSystemAlert('gpu');
     }
     if (message?.type === 'OPEN_AUTODL') await focusAutoDL();
-    if (message?.type === 'GPU_UNAVAILABLE') await clearAlert();
+    if (message?.type === 'GPU_UNAVAILABLE') { await clearAlert(); await closeSystemAlert('gpu'); }
     if (message?.type === 'TEST_GLOBAL_ALERT') {
       const stored = await chrome.storage.sync.get({ config: { alarmSound: 'classic' } });
       const alert = { signature: `test-${Date.now()}`, names: ['全局提醒测试成功'], summary: '这是一条测试提醒。', sourceTabId: null, muted: Boolean(stored.config?.alarmMuted) };
       await broadcastAlert(alert);
       if (!alert.muted) await playAlarm(stored.config?.alarmSound);
+      // force：即使浏览器在前台也弹一次，方便用户确认「系统级弹窗」到底长什么样
+      await presentSystemAlert(
+        gpuAlertPayload('这是一条测试提醒，能弹出这个窗口就说明系统级提醒可用。', alert.names, alert.muted),
+        { force: true }
+      );
+    }
+    if (message?.type === 'TEST_SYSTEM_ALERT') {
+      const opened = await presentSystemAlert(
+        gpuAlertPayload('这是一条测试提醒，能弹出这个窗口就说明系统级提醒可用。', ['系统级提醒自检'], false),
+        { force: true }
+      );
+      sendResponse({ ok: true, opened });
+      return;
+    }
+    // 版本握手：popup 用它判断「浏览器里跑的后台脚本」是不是磁盘上这一份。
+    // unpacked 扩展改了文件不会自动生效，service worker 要手动 reload 才会换代码，
+    // 而 popup.html / popup.js 是每次打开都从磁盘读的 —— 于是会出现
+    // 「界面是新的、后台还是旧的」，用户点了按钮毫无反应又不知道原因。
+    if (message?.type === 'GET_BACKGROUND_INFO') {
+      sendResponse({
+        ok: true,
+        version: chrome.runtime.getManifest().version,
+        features: ['systemAlert', 'alertAttention', 'autoConfirm', 'autoStop']
+      });
+      return;
+    }
+    if (message?.type === 'GET_SYSTEM_ALERT') {
+      await loadAlertWindowState();
+      sendResponse({ payload: alertPayload });
+      return;
+    }
+    if (message?.type === 'ALERT_WINDOW_ACTION') {
+      await handleAlertWindowAction(message.action, message.kind);
+      sendResponse({ ok: true });
+      return;
     }
   })().catch((error) => console.warn('Background action failed:', error));
   return true;

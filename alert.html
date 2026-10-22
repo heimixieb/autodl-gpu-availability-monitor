@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>AutoDL 提醒</title>
+  <link rel="stylesheet" href="alert.css">
+</head>
+<body>
+  <main class="card" id="card" data-accent="green">
+    <div class="head">
+      <div class="badge" id="badge">✓</div>
+      <div class="titles">
+        <h1 id="title">AutoDL 提醒</h1>
+        <p id="subtitle" class="subtitle" hidden></p>
+      </div>
+      <button type="button" class="close" id="close" title="关闭" aria-label="关闭">×</button>
+    </div>
+    <p class="message" id="message"></p>
+    <section class="countdown" id="countdown" hidden>
+      <div class="countdown-row">
+        <span class="countdown-value" id="countdownValue">5:00</span>
+        <span class="countdown-hint" id="countdownHint"></span>
+      </div>
+      <div class="bar"><i id="bar"></i></div>
+    </section>
+    <div class="actions" id="actions"></div>
+  </main>
+  <script src="alert.js"></script>
+</body>
+</html>
