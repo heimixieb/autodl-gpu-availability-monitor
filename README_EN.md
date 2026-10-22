@@ -6,6 +6,21 @@ An open-source Chromium extension that monitors rented AutoDL instances and aler
 
 This is an independent community project, not an official AutoDL product. By default it only alerts you and never starts an instance. Auto-start is an optional, opt-in switch that is off by default and incurs real AutoDL charges once enabled.
 
+## Why this exists
+
+I rent AutoDL instances often. The annoying part is not slow training — it is that the instance is already rented but cannot boot because the host machine's GPUs are all taken.
+
+AutoDL shows a green `GPU充足` row once a GPU frees up. The problem: nobody can sit there refreshing the page.
+
+So the extension watched the page for me and alerted me when a GPU appeared. **That turned out not to be enough.** By the time I saw the alert, walked back to the computer, and clicked Start, the GPU had usually been taken by someone else — the race is measured in minutes, so "alert only" was effectively doing nothing.
+
+Two things were added in response:
+
+1. **Auto-start** — click Start the moment a GPU frees up, so the card is secured before anyone else takes it. The trade-off is that billing begins immediately.
+2. **Shut down after 5 minutes without confirmation** — after an automatic start you get 5 minutes to click "I'm back". Clicking means you are at the computer, so it keeps running; not clicking means nobody is there and the instance is burning money unattended, so it is shut down.
+
+A third piece came from the same experience: with the browser in the background the only remaining cue was sound, and with sound off I had no idea anything had happened. Hence the **system-level alert window**, which is raised to the foreground even while the browser is minimised.
+
 ## Features
 
 - Monitor multiple rented instances by name or instance ID

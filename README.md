@@ -10,6 +10,17 @@ AutoDL 会在 GPU 空出来后显示一行绿色的“GPU充足”，问题是�
 
 所以我做了这个小扩展。你只要告诉它想等哪台实例，然后把 AutoDL 页面留在浏览器里。GPU 一旦空出来，它就会弹窗、响铃，把你叫回来。
 
+### 然后发现「只提醒」根本不够
+
+用了一阵子发现：GPU 空出来那一刻弹提醒，等我看到、回到电脑前、点开机，**卡往往已经被别人抢走了**。抢卡是分钟级的竞争，光提醒等于没做。
+
+于是加了两件事：
+
+1. **自动开机**——GPU 空出的瞬间就替我把「开机」点掉，先把卡抢到手。代价是开机即开始计费。
+2. **5 分钟没人确认就自动关机**——抢到卡之后给我 5 分钟回来点「我已回来」。点了 = 人在，继续用；5 分钟没点 = 没人在电脑前，实例在空跑烧钱，立刻关掉省钱。
+
+第三条来自实际使用中暴露的问题：把浏览器放到后台，提醒就只剩声音；声音没开，我根本不知道发生过什么。所以又加了**系统级弹窗**——浏览器在后台也照样弹到桌面最前面。
+
 ![Chrome](https://img.shields.io/badge/Chrome-supported-4285F4?logo=googlechrome&logoColor=white)
 ![Edge](https://img.shields.io/badge/Edge-supported-0078D7?logo=microsoftedge&logoColor=white)
 ![Arc](https://img.shields.io/badge/Arc-supported-FCBFBD)
